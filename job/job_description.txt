@@ -3,7 +3,8 @@ We are looking for a Data Science Intern.
 Requirements:
 Python
 Machine Learning
-SQL
+Database management system
+Node.js
 Pandas
 NumPy
 NLP
