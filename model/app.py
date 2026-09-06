@@ -1,10 +1,20 @@
-from sentence_transformers import SentenceTransformer
+import os
+from pathlib import Path
+import re
+
+from dotenv import load_dotenv
+from google import genai
 from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
 from pdf_parser import extract_text_from_pdf
 
-from job.jd_processor import jd_read, extract_sections
+from job.jd_processor import jd_read, extract_sections, clean_jd
+
+load_dotenv(Path(__file__).with_name(".env"))
+
 model = SentenceTransformer("all-MiniLM-L6-v2")
 jd = jd_read("C:\\Users\\SAMA\\Downloads\\resume-ai\\job\\job_description.txt")
+jd=clean_jd(jd)
 requirements, responsibilities = extract_sections(jd)
 
 pages = extract_text_from_pdf(
@@ -27,8 +37,6 @@ for page in pages:
 # -----------------------------
 # CREATE RESUME CHUNKS
 # -----------------------------
-
-import re
 
 def create_chunks(text):
 
@@ -78,14 +86,6 @@ resume_chunks = create_chunks(full_text)
 
 print("\nNumber of chunks:", len(resume_chunks))
 
-print("\nChecking SQL in resume...")
-
-print("SQL in full text:", "SQL" in full_text.upper())
-
-for i, chunk in enumerate(resume_chunks):
-    if "SQL" in chunk.upper():
-        print(f"\nSQL found in Chunk {i + 1}:")
-        print(chunk)
 # -----------------------------
 # CREATE CHUNK EMBEDDINGS
 # -----------------------------
@@ -96,30 +96,11 @@ print("Chunk embeddings shape:", chunk_embeddings.shape)
 
 
 MATCH_THRESHOLD = 0.50
-PARTIAL_THRESHOLD = 0.30
+PARTIAL_THRESHOLD = 0.35
 
-SKILL_ALIASES = {
-    "python": ["python"],
-    "machine learning": ["machine learning", "ml", "scikit-learn", "sklearn"],
-    "pandas": ["pandas"],
-    "numpy": ["numpy"],
-    "nlp": ["nlp", "natural language processing"],
-}
-
-
-def find_skill_alias(requirement, text):
-    aliases = SKILL_ALIASES.get(
-        requirement.strip().lower(),
-        [requirement.strip().lower()]
-    )
-
-    for alias in aliases:
-        match = re.search(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE)
-
-        if match:
-            return alias
-
-    return None
+def find_exact_skill(requirement, text):
+    pattern = rf"(?<!\w){re.escape(requirement.strip())}(?!\w)"
+    return re.search(pattern, text, re.IGNORECASE)
 
 results = []
 
@@ -136,16 +117,20 @@ for requirement in requirements:
     best_score = similarities[0][best_index]
 
     matched_chunk = resume_chunks[best_index]
-    matched_alias = find_skill_alias(requirement, full_text)
+    matched_skill = find_exact_skill(requirement, full_text)
 
-    if matched_alias:
+    if matched_skill:
         status = "MATCHED"
         final_score = 1.0
 
         for chunk in resume_chunks:
-            if re.search(rf"\b{re.escape(matched_alias)}\b", chunk, re.IGNORECASE):
+            if find_exact_skill(requirement, chunk):
                 matched_chunk = chunk
                 break
+
+    elif len(requirement.split()) == 1:
+        status = "MISSING"
+        final_score = 0.0
 
     elif best_score >= MATCH_THRESHOLD:
         status = "MATCHED"
@@ -164,7 +149,7 @@ for requirement in requirements:
         "score": final_score,
         "status": status,
         "matched_chunk": matched_chunk,
-        "matched_alias": matched_alias,
+        "matched_skill": matched_skill.group(0) if matched_skill else None,
     })
 
     print(f"\nRequirement: {requirement}")
@@ -177,3 +162,60 @@ partial_points = sum(result["status"] == "PARTIAL" for result in results) * 0.5
 match_percentage = ((matched_points + partial_points) / len(results)) * 100
 
 print(f"\nOverall match score: {match_percentage:.1f}%")
+
+
+def generate_explanation(results, match_percentage):
+    matched = [item["requirement"] for item in results if item["status"] == "MATCHED"]
+    partial = [item["requirement"] for item in results if item["status"] == "PARTIAL"]
+    missing = [item["requirement"] for item in results if item["status"] == "MISSING"]
+
+    def local_explanation():
+        if match_percentage >= 75:
+            fit = "strong fit"
+        elif match_percentage >= 50:
+            fit = "moderate fit"
+        else:
+            fit = "limited fit"
+
+        explanation = (
+            f"You are a {fit} for this role with an overall match score of "
+            f"{match_percentage:.1f}%."
+        )
+        if matched:
+            explanation += f" Your matching strengths include: {', '.join(matched)}."
+        if partial:
+            explanation += f" These areas are partially aligned: {', '.join(partial)}."
+        if missing:
+            explanation += f" Missing requirements to improve are: {', '.join(missing)}."
+        return explanation
+
+    prompt = f"""You are a professional resume evaluator.
+
+Give a concise, honest explanation of the candidate's fit for the job based only on
+the structured matching results below. Do not invent skills, experience, or claims.
+Mention the overall fit, matched strengths, partial matches, and missing skills.
+Use simple professional English and keep the response under 120 words.
+
+Overall score: {match_percentage:.1f}%
+Matched requirements: {matched or "None"}
+Partial requirements: {partial or "None"}
+Missing requirements: {missing or "None"}
+"""
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return local_explanation()
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as error:
+        return local_explanation() + f" AI explanation was unavailable because of a Gemini API error: {error}"
+
+
+print("\nExplanation:")
+print(generate_explanation(results, match_percentage))

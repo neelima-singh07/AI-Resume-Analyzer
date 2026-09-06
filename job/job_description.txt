@@ -7,7 +7,9 @@ Database management system
 Node.js
 Pandas
 NumPy
-NLP
+Natural Language Processing
+java
+Data Analysis
 
 Responsibilities:
 Build machine learning models.

@@ -1,3 +1,5 @@
 pymupdf
-pymupdf
 sentence-transformers
+scikit-learn
+google-genai
+python-dotenv
